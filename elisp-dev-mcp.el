@@ -787,13 +787,13 @@ Unlike `elisp-dev-mcp--read-source-file', imposes no directory restriction."
 Returns the expanded path or signals a tool error."
   (unless (stringp file-path)
     (mcp-server-lib-tool-throw "file-path must be a string"))
+  (unless (file-name-absolute-p file-path)
+    (mcp-server-lib-tool-throw "file-path must be an absolute path"))
+  (when (string-match-p "\\.\\." file-path)
+    (mcp-server-lib-tool-throw "Path contains illegal '..' traversal"))
   (let ((expanded (expand-file-name file-path)))
-    (unless (file-name-absolute-p expanded)
-      (mcp-server-lib-tool-throw "file-path must be an absolute path"))
     (unless (string-suffix-p ".el" expanded)
       (mcp-server-lib-tool-throw "file-path must end in .el"))
-    (when (string-match-p "\\.\\." expanded)
-      (mcp-server-lib-tool-throw "Path contains illegal '..' traversal"))
     (unless (file-exists-p expanded)
       (mcp-server-lib-tool-throw (format "File not found: %s" expanded)))
     (unless (file-writable-p expanded)
@@ -805,7 +805,13 @@ Returns the expanded path or signals a tool error."
 Accepts library names (e.g. \"org\") or absolute paths."
   (if (elisp-dev-mcp--library-name-p file-path)
       (elisp-dev-mcp--resolve-library-to-source-path file-path)
-    (expand-file-name file-path)))
+    (progn
+      (unless (file-name-absolute-p file-path)
+        (mcp-server-lib-tool-throw "file-path must be an absolute path"))
+      (unless (or (string-suffix-p ".el" file-path)
+                  (string-suffix-p ".el.gz" file-path))
+        (mcp-server-lib-tool-throw "file-path must end in .el or .el.gz"))
+      (expand-file-name file-path))))
 
 (defun elisp-dev-mcp--scan-forms-in-buffer ()
   "Return list of (START . END) buffer positions for all top-level forms.
@@ -1069,6 +1075,12 @@ MCP Parameters:
           (dry-run-p (equal dry-run "true"))
           (op-lc (downcase operation))
           (file-content (elisp-dev-mcp--read-any-el-file abs-path)))
+     (unless dry-run-p
+       (let ((visiting-buf (find-buffer-visiting abs-path)))
+         (when (and visiting-buf (buffer-modified-p visiting-buf))
+           (mcp-server-lib-tool-throw
+            (format "Buffer visiting %s has unsaved changes; save it first"
+                    abs-path)))))
      (unless (member op-lc '("replace" "insert_before" "insert_after"))
        (mcp-server-lib-tool-throw
         (format "Unknown operation: %s. Use replace, insert_before, or insert_after"
@@ -1136,9 +1148,17 @@ MCP Parameters:
         (format "%s must be a string" (car pair)))))
    (unless (stringp new-text)
      (mcp-server-lib-tool-throw "new-text must be a string"))
+   (when (string-empty-p old-text)
+     (mcp-server-lib-tool-throw "old-text must be a non-empty string"))
    (let* ((abs-path (elisp-dev-mcp--validate-writable-el-path file-path))
           (dry-run-p (equal dry-run "true"))
           (file-content (elisp-dev-mcp--read-any-el-file abs-path)))
+     (unless dry-run-p
+       (let ((visiting-buf (find-buffer-visiting abs-path)))
+         (when (and visiting-buf (buffer-modified-p visiting-buf))
+           (mcp-server-lib-tool-throw
+            (format "Buffer visiting %s has unsaved changes; save it first"
+                    abs-path)))))
      (with-temp-buffer
        (insert file-content)
        (let* ((bounds (elisp-dev-mcp--find-form-bounds form-type form-name))
@@ -1149,9 +1169,9 @@ MCP Parameters:
               (search-pos 0))
          ;; Count occurrences of old-text within the form
          (while (setq search-pos
-                      (string-search old-text form-text search-pos))
+                      (cl-search old-text form-text :start2 search-pos))
            (setq occurrences (1+ occurrences))
-           (setq search-pos (+ search-pos (length old-text))))
+           (setq search-pos (1+ search-pos)))
          (cond
           ((= occurrences 0)
            (mcp-server-lib-tool-throw
@@ -1161,7 +1181,7 @@ MCP Parameters:
             (format "old-text matches %d times in (%s %s); must match exactly once"
                     occurrences form-type form-name)))
           (t
-           (let* ((match-pos (string-search old-text form-text))
+           (let* ((match-pos (cl-search old-text form-text))
                   (new-form
                    (concat (substring form-text 0 match-pos)
                            new-text
